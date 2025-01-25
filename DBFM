@@ -1,0 +1,220 @@
+import pandas as pd
+import numpy as np
+import tensorflow as tf
+
+
+# 导入训练数据
+data = pd.read_csv('../data_feature.csv')  # 训练数据
+# 删除序号列
+data = data.drop('Unnamed: 0', axis=1)
+# 转为array
+dataset = np.array(data)
+x_train = dataset[:, :dataset.shape[1] - 1]  # 不带标志位
+x_sign = dataset[:, -1].reshape(-1, 1)  # 标志位
+
+# 参数设置
+vec_dim = 32
+epochs = 15
+learning_rate = 0.01
+batch_size = 2048
+
+
+
+# 正则因子
+reg_w = 0.008
+reg_v = 0.008
+reg_dnn = 0.008
+
+
+# =====================模型部分================
+
+
+def create_deep_fm(x, feat_num, vec_dim, sign, deep_layers=[75,30,10,5,1], dropout_keep_fm=[1, 1],dropout_keep_deep=[1,1,1,1,1,1],):
+    # 一阶模型
+    w0 = tf.Variable(tf.random_uniform([1]), name="bias")
+    W = tf.Variable(tf.random_uniform([feat_num, 1], 0.0, 1.0), name="feature_weight_0")
+    V = tf.Variable(tf.random_normal([feat_num, vec_dim], 0.0, 0.01), name="feature_embeddings")
+    y_first_order = w0 + tf.matmul(x, W)
+    # 增加dropout，防止过拟合
+    y_first_order = tf.nn.dropout(y_first_order, dropout_keep_fm[0])
+
+    # 二阶模型
+    # 用户与目标项目之间的关联
+    x_1 = tf.concat([x[:, :708], x[:, 3274:]], 1)  # 用户特征与目标项目特征相组合
+    v_1 = tf.concat([V[:708, :], V[3274:, :]], 0)
+    y_second_order_1 = 0.5 * tf.reduce_sum(tf.square(tf.matmul(x_1, v_1)) - tf.matmul(tf.square(x_1), tf.square(v_1)), axis=1, keep_dims=True)
+
+    # 已有物品与目标物品之间的关联
+    x_2 = tf.concat([x[:, 708:3274], x[:, 3274:]], 1)  # 用户特征与目标项目特征相组合
+    v_2 = tf.concat([V[708:3274, :], V[3274:, :]], 0)
+    y_second_order_2 = 0.5 * tf.reduce_sum(tf.square(tf.matmul(x_2, v_2)) - tf.matmul(tf.square(x_2), tf.square(v_2)), axis=1, keep_dims=True)
+
+    # 购物篮之间的关联
+    y_second_order_3 = 0.5 * tf.reduce_sum(tf.square(tf.matmul(x[:, 708:3274], V[708:3274, :])) - tf.matmul(tf.square(x[:, 708:3274]),                                                                                         tf.square(
+                                                                                             V[708:3274, :])), axis=1, keep_dims=True)
+    y_second_order = y_second_order_1 + y_second_order_2 + y_second_order_3
+    # 增加dropout，防止过拟合
+    y_second_order = tf.nn.dropout(y_second_order, dropout_keep_fm[1])
+
+    # 神经网络部分
+    # 用户特征的稠密向量
+    dense_user = tf.matmul(x[:, :708], V[:708, :])
+
+    # 目标项目特征的稠密向量
+    dense_item = tf.matmul(x[:, 3274:], V[3274:, :])
+
+    # # 已有物品的稠密向量（相加）
+    # dense_basket = tf.matmul(x[:, 708:3274], V[708:3274, :])
+    # y_deep = tf.concat([dense_user, dense_basket, dense_item], 1)
+
+    # # 已有物品带权值相加（DAM）
+    # # 每个用户对每个物品的内积 708*10 10*2566 = 708*2566
+    # user_item_inner = tf.matmul(V[:708,:], tf.transpose(V[3274:,:]))
+    # # 对于每一条数据，其对应的用户关于全部项目的系数矩阵 3918*708 708*2566 = 3918*2566
+    # input_user_items = tf.matmul(x[:, :708], user_item_inner)
+    # # 对于每条数据，其对应的用户交互过的购物篮项目的系数矩阵  3918*2566
+    # input_user_baskets = tf.multiply(input_user_items, x[:, 708:3274])
+    # # 开始求权值
+    # # 对购物篮物品矩阵求0值个数（更准确）
+    # zero = tf.constant(0, dtype=tf.float32)
+    # where = tf.equal(x[:, 708:3274], zero)
+    # # 将布尔型转为数值型，是0值（TRUE）则为1，否则为0
+    # where_ = tf.cast(where, dtype=tf.float32)
+    # # 通过求和操作进而得到每行0值的个数
+    # length = tf.reduce_sum(where_, axis=1, keep_dims=True)
+    #
+    # # 对原始矩阵做指数运算
+    # exp_matrix = tf.exp(input_user_baskets)
+    # # 每行累加并减去0的部分
+    # exp_sub = tf.reduce_sum(exp_matrix, axis=1, keep_dims=True) - length * tf.exp(0.)
+    # # 点除
+    # exp_div = exp_matrix / (exp_sub+0.0001)
+    #
+    # # 权值矩阵点乘购物篮矩阵，得到不同位置的权值,3918 * 2566
+    # weight_basket = tf.multiply(exp_div, x[:, 708:3274])
+    # # 点乘项目隐特征矩阵，得到带权值的项目累加
+    # dense_basket = tf.matmul(weight_basket, V[708:3274, :])
+    # y_deep = tf.concat([dense_user, dense_item, dense_basket], 1)
+
+    # 已有物品的稠密向量（求平均）, +0.0001确保分母不会为0
+    nonzero_num = tf.count_nonzero(x[:, 708:3274], 1, keep_dims=True, dtype=tf.float32)+0.0001  # 每行非零个数
+    dense_basket = tf.matmul(x[:, 708:3274], V[708:3274, :])/nonzero_num
+    y_deep = tf.concat([dense_user, dense_item, dense_basket], 1)
+
+    # # 已有物品的稠密向量（最小值）
+    # # 对V 中basket item 部分进行累加
+    # sum_V = tf.reduce_sum(V[708:3274, :], axis=1, keep_dims=True)
+    # # 转置处理
+    # sum_V_= tf.transpose(sum_V)
+    # # 点乘，找出最小值
+    # sum_matri = tf.multiply(x[:, 708:3274],sum_V_)
+    # # 找出每行最大值的索引,返回值为1*3918
+    # index = tf.argmin(sum_matri,1)
+    # # 按照索引取值
+    # dense_basket = tf.gather(V[708:3274, :], index)
+    # y_deep = tf.concat([dense_user, dense_item, dense_basket], 1)
+
+    # # 已有物品的稠密向量（最大值）
+    # # 对V 中basket item 部分进行累加
+    # sum_V = tf.reduce_sum(V[708:3274, :], axis=1, keep_dims=True)
+    # # 转置处理
+    # sum_V_= tf.transpose(sum_V)
+    # # 点乘，找出最小值
+    # sum_matri = tf.multiply(x[:, 708:3274],sum_V_)
+    # # 找出每行最大值的索引,返回值为1*3918
+    # index = tf.argmax(sum_matri,1)
+    # # 按照索引取值
+    # dense_basket = tf.gather(V[708:3274, :], index)
+    # y_deep = tf.concat([dense_user, dense_item, dense_basket], 1)
+
+    weights = dict()
+    # 初始化各层的权重
+    input_size = vec_dim*3  # 3个特征域
+    glorot = tf.sqrt(2.0 / (input_size + deep_layers[0]))
+    weights["layer_0"] = tf.Variable(
+        tf.random_normal(shape=(input_size, deep_layers[0]), mean=0, stddev=glorot),
+        name="weights_layer0")
+    weights["bias_0"] = tf.Variable(tf.random_normal(shape=(1, deep_layers[0]), mean=0, stddev=glorot),
+                                    name="weights_bias0")
+    num_layer = len(deep_layers)
+    # 高层参数初始化
+    for i in range(1, num_layer):
+        glorot = tf.sqrt(2.0 / (deep_layers[i - 1] + deep_layers[i]))
+        weights["layer_%d" % i] = tf.Variable(
+            tf.random_normal(shape=(deep_layers[i - 1], deep_layers[i]), mean=0, stddev=glorot),
+            name="weights_layer" + str(i))  # layers[i-1] * layers[i]
+        weights["bias_%d" % i] = tf.Variable(
+            tf.random_normal(shape=(1, deep_layers[i]), mean=0, stddev=glorot),
+            name="weights_bias" + str(i))  # 1 * layer[i]
+
+    # 对dnn的各层进行连接
+    for i in range(0, len(deep_layers)):
+        y_deep = tf.add(tf.matmul(y_deep, weights["layer_%d" % i]), weights["bias_%d" % i])
+        y_deep = tf.nn.relu(y_deep)
+        y_deep = tf.nn.dropout(y_deep, dropout_keep_deep[1 + i])  # dropout at each Deep layer
+    print('y_deep shape:', y_deep.shape)
+
+    # 低阶高阶联合输出
+    concat_input = tf.concat([y_first_order, y_second_order, y_deep], axis=1)
+    input_size = 1 + 1 + deep_layers[-1]
+    glorot = tf.sqrt(2.0 / (input_size + 1))
+    weights["concat_projection"] = tf.Variable(tf.random_normal(shape=(input_size, 1), mean=0, stddev=glorot),
+                                               name="concat_projection0")  # layers[i-1]*layers[i]
+    weights["concat_bias"] = tf.Variable(tf.constant(0.01),  name="concat_bias0")
+    out = tf.add(tf.matmul(concat_input, weights["concat_projection"]), weights["concat_bias"], name='out')
+    # 还可以对偏置进行正则化处理
+    regularization = reg_w * tf.nn.l2_loss(W) + reg_v * tf.nn.l2_loss(V) + reg_dnn * tf.nn.l2_loss(weights["layer_0"]) \
+                     + reg_dnn * tf.nn.l2_loss(weights["layer_1"]) + reg_dnn * tf.nn.l2_loss(weights["layer_2"] )\
+                     + reg_dnn * tf.nn.l2_loss(weights["layer_3"]) + reg_dnn * tf.nn.l2_loss(weights["layer_4"])\
+                     + reg_dnn * tf.nn.l2_loss(weights["bias_0"]) + reg_dnn * tf.nn.l2_loss(weights["bias_1"])\
+                     + reg_dnn * tf.nn.l2_loss(weights["bias_2"]) + reg_dnn * tf.nn.l2_loss(weights["bias_3"]) + reg_dnn * tf.nn.l2_loss(weights["bias_4"])
+
+    # 最后通过sigmoid函数
+    #score = tf.nn.sigmoid(out, name='score')
+    # score = tf.nn.tanh(out, name='score')
+    # loss
+    loss = tf.reduce_sum(-tf.log(tf.nn.sigmoid(tf.multiply(out, sign)))) + regularization
+
+    return out, loss
+
+def batcher(X_, y_, batch_size=-1):
+
+    n_samples = X_.shape[0]
+    if batch_size == -1:
+        batch_size = n_samples
+    if batch_size < 1:
+        raise ValueError('Parameter batch_size={} is unsupported'.format(batch_size))
+
+    for i in range(0, n_samples, batch_size):
+        upper_bound = min(i + batch_size, n_samples)
+        # print(i)
+        ret_x = X_[i:upper_bound]
+        ret_y = y_[i:upper_bound]
+        yield (ret_x,ret_y)
+
+
+# 占位符
+x = tf.placeholder(tf.float32, shape=[None, 5840], name="input_x")
+sign = tf.placeholder(tf.float32, shape=[None, 1], name="sign")
+
+# 训练
+
+prediction, Loss = create_deep_fm(x, 5840, vec_dim, sign)
+prediction_ = tf.multiply(prediction, tf.ones((1)), name='Prediction')
+# 给prediction命名，并不改变其值
+
+train_op = tf.train.AdamOptimizer(learning_rate).minimize(Loss)
+
+with tf.Session() as sess:
+    sess.run(tf.global_variables_initializer())
+    for e in range(epochs):
+        step = 0
+        print("epoch:{}".format(e))
+        for batch_x, batch_sign in batcher(x_train, x_sign, batch_size):  # 训练数据是分小批次训练的
+            sess.run(train_op, feed_dict={x: batch_x, sign: batch_sign})
+            if step % 10 == 0:
+                train_loss = sess.run(Loss, feed_dict={x: batch_x, sign: batch_sign})
+                print("batch train_mse={}".format(train_loss))
+            step += 1
+    saver = tf.train.Saver()
+    tf.train.Saver().save(sess, "./model_mean_32_2/dbfm")
